@@ -1,0 +1,22 @@
+[package]
+name = "cratesio-dbdump-csvtab"
+version = "0.1.0"
+edition = "2018"
+authors = ["Alyssa Awoo <alticodes@gmail.com>"]
+documentation = "http://docs.rs/cratesio-dbdump-csvtab"
+exclude = ["/testdata/extracted/*"]
+keywords = ["crates", "csvtab", "sqlite"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/alyti/cratesio-dbdump-csvtab"
+description = "csvtab wrapper for crates.io db dump"
+
+[dependencies]
+thiserror = "1.0.19"
+cached-path = "0.5.1"
+flate2 = "1.0"
+tar = "0.4"
+
+[dependencies.rusqlite]
+features = ["bundled", "csvtab"]
+version = "0.25.1"
