@@ -1,5 +1,10 @@
 use flate2::read::GzDecoder;
-use std::{collections::HashMap, fs::{create_dir_all, File}, io, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs::{create_dir_all, File},
+    io,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 use cached_path::{Cache, CacheBuilder, Error as CachedError};
@@ -25,6 +30,7 @@ pub struct CratesIODumpLoader {
     pub files: Vec<PathBuf>,
     pub cache: Cache,
     pub target_path: PathBuf,
+    pub preload: bool,
 
     table_schema: HashMap<String, String>,
 }
@@ -53,6 +59,7 @@ impl Default for CratesIODumpLoader {
             cache: Cache::new().unwrap(), // TODO: Maybe just store the builder instead... idk...
             target_path: Path::new("data").to_path_buf(),
             table_schema: HashMap::new(),
+            preload: false,
         }
     }
 }
@@ -74,7 +81,8 @@ impl CratesIODumpLoader {
     }
 
     pub fn table_schema(&mut self, table: &str, schema: &str) -> &mut Self {
-        self.table_schema.insert(table.to_string(), schema.to_string());
+        self.table_schema
+            .insert(table.to_string(), schema.to_string());
         self
     }
 
@@ -86,6 +94,11 @@ impl CratesIODumpLoader {
     pub fn cache(&mut self, builder: CacheBuilder) -> Result<&mut Self, Error> {
         self.cache = builder.build()?;
         Ok(self)
+    }
+
+    pub fn preload(&mut self, should: bool) -> &mut Self {
+        self.preload = should;
+        self
     }
 
     pub fn minimal(&mut self) -> &mut Self {
@@ -119,16 +132,44 @@ impl CratesIODumpLoader {
                 f.unpack(self.target_path.join(aname))?;
             }
         }
-
         Ok(self)
     }
 
-    pub fn create_virtual_tables(&mut self, db: &Connection) -> Result<(), Error> {
+    pub fn sqlite_path(&self) -> PathBuf {
+        self.target_path.join(Path::new("db.sqlite"))
+    }
+
+    pub fn open_db(&mut self) -> Result<Connection, Error> {
+        let path = self.sqlite_path();
+
+        let mut should_load = false;
+        let first_local_file = self.target_path.join(self.files.first().unwrap());
+        if !path.exists() {
+            should_load = true;
+        } else if !first_local_file.exists()
+            && path.exists()
+            && path.metadata()?.created()? <= first_local_file.metadata()?.created()?
+        {
+            should_load = true;
+            std::fs::remove_file(&path)?;
+        }
+
+        let db = Connection::open(&path)?;
+        rusqlite::vtab::csvtab::load_module(&db)?;
+
+        if should_load {
+            self.load_dump_into(&db)?;
+        }
+        Ok(db)
+    }
+
+    pub fn load_dump_into(&mut self, db: &Connection) -> Result<(), Error> {
         let schema = self
             .files
             .iter()
             .map(|f| self.file_to_query(f))
             .fold(String::new(), |a, b| a + b.as_str() + "\n");
+        dbg!(&schema);
         db.execute_batch(schema.as_str())?;
         Ok(())
     }
@@ -136,19 +177,44 @@ impl CratesIODumpLoader {
     fn file_to_query(&self, path: &PathBuf) -> String {
         let actual_file = self.target_path.join(path);
         let table = path.file_stem().unwrap_or_default().to_string_lossy();
-        match self.table_schema.get(&table.to_string()) {
+        let vtable = match self.preload {
+            true => format!("temp_{}", table),
+            false => table.to_string(),
+        };
+
+        let vtab = match self.table_schema.get(&table.to_string()) {
             Some(schema) => format!(
-                "CREATE VIRTUAL TABLE {} USING csv(filename='{}',schema='{}');",
-                table,
+                r#"
+                    DROP TABLE IF EXISTS {0};
+                    CREATE VIRTUAL TABLE {0} USING csv(filename='{1}',header=yes,schema='{2}');
+                "#,
+                vtable,
                 actual_file.display(),
                 schema,
             ),
             None => format!(
-                "CREATE VIRTUAL TABLE {} USING csv(filename='{}',header=yes);",
-                table,
+                r#"
+                    DROP TABLE IF EXISTS {0};
+                    CREATE VIRTUAL TABLE {0} USING csv(filename='{1}',header=yes);
+                "#,
+                vtable,
                 actual_file.display(),
-            )
+            ),
+        };
+
+        if self.preload {
+            let ptab = format!(
+                r#"
+                    DROP TABLE IF EXISTS {0};
+                    CREATE TABLE {0} AS SELECT * FROM {1};
+                "#,
+                table, vtable,
+            );
+
+            return format!("{}\n{}", vtab, ptab);
         }
+
+        vtab
     }
 }
 
@@ -175,16 +241,41 @@ fn test_basic_csvtab() -> Result<(), Error> {
 
     // Load dump from a .tar.gz archive.
     CratesIODumpLoader::default()
+        .preload(true)
         .resource("testdata/test.tar.gz")
         .target_path(Path::new("testdata/extracted"))
         .tables(&["test"])
         .table_schema("test", "CREATE TABLE x(renamed_id INT, name TEXT);")
         .cache(cache)?
         .update()?
-        .create_virtual_tables(&db)?;
+        .load_dump_into(&db)?;
 
     let mut s = db.prepare("SELECT renamed_id FROM test WHERE name = ?")?;
-    let dummy = s.query_row(["awooo"], |row| row.get::<_, String>(0))?;
-    assert_eq!("3", dummy);
+    let dummy = s.query_row(["awooo"], |row| row.get::<_, i64>(0))?;
+    assert_eq!(3, dummy);
     Ok(())
 }
+
+#[test]
+fn test_basic_csvtab_open() -> Result<(), Error> {
+    // Setup cache.
+    let cache = Cache::builder().progress_bar(None);
+
+    // Load dump from a .tar.gz archive.
+    let db = CratesIODumpLoader::default()
+        .preload(true)
+        .resource("testdata/test.tar.gz")
+        .target_path(Path::new("testdata/extracted"))
+        .tables(&["test"])
+        .table_schema("test", "CREATE TABLE x(renamed_id INT, name TEXT);")
+        .cache(cache)?
+        .update()?
+        .open_db()?;
+
+    let mut s = db.prepare("SELECT renamed_id FROM test WHERE name = ?")?;
+    let dummy = s.query_row(["awooo"], |row| row.get::<_, i64>(0))?;
+    assert_eq!(3, dummy);
+    Ok(())
+}
+
+
