@@ -1,6 +1,6 @@
 [package]
 name = "cratesio-dbdump-csvtab"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2018"
 authors = ["Alyssa Awoo <alticodes@gmail.com>"]
 documentation = "http://docs.rs/cratesio-dbdump-csvtab"

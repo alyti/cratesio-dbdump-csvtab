@@ -18,7 +18,7 @@ pub enum Error {
     #[error("dump not found")]
     NotFound(#[from] CachedError),
 
-    #[error("failed to create virtual table")]
+    #[error("failed to load db")]
     RusqliteError(#[from] SqliteError),
 
     #[error("failed to unpack dump")]
@@ -169,7 +169,6 @@ impl CratesIODumpLoader {
             .iter()
             .map(|f| self.file_to_query(f))
             .fold(String::new(), |a, b| a + b.as_str() + "\n");
-        dbg!(&schema);
         db.execute_batch(schema.as_str())?;
         Ok(())
     }
