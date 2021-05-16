@@ -206,6 +206,7 @@ impl CratesIODumpLoader {
                 r#"
                     DROP TABLE IF EXISTS {0};
                     CREATE TABLE {0} AS SELECT * FROM {1};
+                    DROP TABLE {1};
                 "#,
                 table, vtable,
             );
